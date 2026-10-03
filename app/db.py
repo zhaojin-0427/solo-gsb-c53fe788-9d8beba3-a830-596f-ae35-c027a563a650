@@ -9,6 +9,10 @@
 - inversions：观测反演记录。创建时把所选分析快照、观测串、e 与
   反演结果整体冻结存一份副本；即使原分析被删除，反演记录仍可回看。
   编辑当前灯串不影响任何已冻结的分析或反演记录。
+
+灯串修订（``apply_revision``）只改 lights 表中被修订灯的一行，且在
+``BEGIN IMMEDIATE`` 事务内核对当前整组灯名、灯串与 W、k 同冻结快照
+完全一致后才写入；快照被删除或工作区状态冲突时拒绝且不写入。
 """
 
 from __future__ import annotations
@@ -232,3 +236,71 @@ def delete_inversion(conn: sqlite3.Connection, inversion_id: int) -> bool:
     cur = conn.execute("DELETE FROM inversions WHERE id = ?", (inversion_id,))
     conn.commit()
     return cur.rowcount > 0
+
+
+def apply_revision(
+    conn: sqlite3.Connection,
+    snapshot: list[dict[str, str]],
+    w: int,
+    k: int,
+    light_index: int,
+    new_pattern: str,
+) -> tuple[bool, str | None, list[dict[str, Any]] | None]:
+    """在一个 ``BEGIN IMMEDIATE`` 事务内把修订落到**当前工作灯串**。
+
+    写入前逐项核对：当前灯的数量、每盏灯的名称与灯串（按 seq 序）以及
+    设置 W、k 必须与冻结快照完全一致；任何一项不一致（工作区已被改动）
+    即回滚并返回失败，绝不写入。核对通过后仅 ``UPDATE`` 被修订灯这一行，
+    analyses / inversions 表完全不触碰，历史分析与反演记录继续可回看。
+
+    返回 ``(是否成功, 冲突说明, 更新后的灯串列表)``。
+    """
+    # 关闭模块级隐式事务管理，全程手动 BEGIN/COMMIT/ROLLBACK
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT w, k FROM settings WHERE id = 1").fetchone()
+        cur_w, cur_k = row["w"], row["k"]
+        if cur_w != w or cur_k != k:
+            conn.execute("ROLLBACK")
+            return (
+                False,
+                f"当前参数 W={cur_w}、k={cur_k} 与快照 W={w}、k={k} 不一致，拒绝写入（工作区未改动）。",
+                None,
+            )
+
+        rows = conn.execute(
+            "SELECT id, seq, name, pattern FROM lights ORDER BY seq, id"
+        ).fetchall()
+        if len(rows) != len(snapshot):
+            conn.execute("ROLLBACK")
+            return (
+                False,
+                f"当前灯数 {len(rows)} 与快照灯数 {len(snapshot)} 不一致，拒绝写入（工作区未改动）。",
+                None,
+            )
+        for pos, (r, snap) in enumerate(zip(rows, snapshot)):
+            if r["name"] != snap["name"] or r["pattern"] != snap["pattern"]:
+                conn.execute("ROLLBACK")
+                return (
+                    False,
+                    f"当前第 {pos + 1} 盏灯（名称/灯串）与快照不一致"
+                    f"：当前为「{r['name']}」{r['pattern']}，"
+                    f"快照为「{snap['name']}」{snap['pattern']}，拒绝写入（工作区未改动）。",
+                    None,
+                )
+
+        target_id = rows[light_index]["id"]
+        cur = conn.execute(
+            "UPDATE lights SET pattern = ? WHERE id = ?", (new_pattern, target_id)
+        )
+        if cur.rowcount != 1:  # 理论上不会发生：行在上面的核对中刚读过
+            conn.execute("ROLLBACK")
+            return False, "替换灯串时影响行数异常，已回滚（工作区未改动）。", None
+        conn.execute("COMMIT")
+        return True, None, list_lights(conn)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = ""  # 恢复 sqlite3 模块默认隔离级别

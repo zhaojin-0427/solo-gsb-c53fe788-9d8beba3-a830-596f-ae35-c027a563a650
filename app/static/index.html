@@ -51,6 +51,7 @@
       <div class="tabs" role="tablist">
         <button id="tab-precheck" class="tab active" type="button" role="tab">可辨性预检</button>
         <button id="tab-invert" class="tab" type="button" role="tab">观测反演</button>
+        <button id="tab-revise" class="tab" type="button" role="tab">灯串修订</button>
       </div>
 
       <div id="pane-precheck">
@@ -80,6 +81,35 @@
           <div id="inv-msg" class="msg" role="status"></div>
         </div>
         <div id="inv-result" class="inv-result"></div>
+      </div>
+
+      <div id="pane-revise" hidden>
+        <div class="invert-form">
+          <label class="inv-field">① 选择一条「W 位不可辨」的冻结分析
+            <select id="rev-snapshot"></select>
+          </label>
+          <div id="rev-snap-meta" class="inv-snap-meta muted"></div>
+          <label class="inv-field">② 指定要修订的灯（只允许翻这一盏）
+            <select id="rev-light"></select>
+          </label>
+          <div class="inv-row">
+            <label class="inv-e">最多翻转位数
+              <select id="rev-maxflips">
+                <option value="1">1 位</option>
+                <option value="2">2 位</option>
+              </select>
+            </label>
+            <button id="btn-revise" class="btn accent" type="button">生成修订建议（穷举全部候选）</button>
+          </div>
+          <div class="inv-snap-meta" style="margin-top:8px">
+            搜索只翻转所选灯的 1（或 1、2）位，修订后灯串仍须同时含 0、1；
+            <b>每个候选都以全部灯对独立相位在 W 位的最小汉明距离 &gt; 2k 判定</b>，
+            不只是修原混淆灯对。裁决顺序：翻转数最少 → W 位全局最小距离最大 →
+            翻转位置序列（从 0 起）字典序最小；穷举同翻转数全部候选，不返回首个可行方案。
+          </div>
+          <div id="rev-msg" class="msg" role="status"></div>
+        </div>
+        <div id="rev-result" class="inv-result"></div>
       </div>
     </section>
 

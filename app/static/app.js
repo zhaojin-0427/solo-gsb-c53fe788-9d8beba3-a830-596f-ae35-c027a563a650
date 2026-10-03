@@ -40,10 +40,13 @@ let viewingInversionSnapshot = false;
 // ---------- 标签页 ----------
 function switchTab(name) {
   const isInv = name === "invert";
-  $("#tab-precheck").classList.toggle("active", !isInv);
+  const isRev = name === "revise";
+  $("#tab-precheck").classList.toggle("active", !isInv && !isRev);
   $("#tab-invert").classList.toggle("active", isInv);
-  $("#pane-precheck").hidden = isInv;
+  $("#tab-revise").classList.toggle("active", isRev);
+  $("#pane-precheck").hidden = isInv || isRev;
   $("#pane-invert").hidden = !isInv;
+  $("#pane-revise").hidden = !isRev;
 }
 
 // ---------- 灯串编辑 ----------
@@ -673,6 +676,221 @@ async function viewAnalysis(id) {
   await loadHistory(id);
 }
 
+// ---------- 灯串修订 ----------
+let revSnapshots = [];           // 不可辨冻结分析列表
+const revDetailCache = new Map(); // id -> 分析详情（含快照）
+let revSuggestion = null;        // 最近一次建议结果
+
+async function loadRevSnapshots(prefId) {
+  const data = await api("/api/analyses");
+  revSnapshots = data.analyses.filter((a) => !a.solvable);
+  const sel = $("#rev-snapshot");
+  const prev = prefId !== undefined ? prefId
+    : sel.options.length ? Number(sel.value) : null;
+  sel.innerHTML = "";
+  if (!revSnapshots.length) {
+    const opt = document.createElement("option");
+    opt.textContent = "（尚无「W 位不可辨」的已保存分析，请先在左侧创建一次无解分析）";
+    opt.value = "";
+    sel.add(opt);
+    $("#rev-light").innerHTML = "";
+    $("#rev-snap-meta").textContent = "";
+    return;
+  }
+  revSnapshots.forEach((a) => {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = `#${a.id} · W=${a.w} k=${a.k} · ${a.light_count} 盏灯 · W 内无解${a.note ? ` · ${a.note}` : ""}`;
+    sel.add(opt);
+  });
+  if (prev !== null && revSnapshots.some((a) => a.id === prev)) sel.value = String(prev);
+  await renderRevSnapshot();
+}
+
+async function renderRevSnapshot() {
+  const meta = $("#rev-snap-meta");
+  const lightSel = $("#rev-light");
+  const id = Number($("#rev-snapshot").value);
+  const prevLight = lightSel.options.length ? Number(lightSel.value) : 0;
+  lightSel.innerHTML = "";
+  if (!id) { meta.textContent = ""; return; }
+  let rec = revDetailCache.get(id);
+  if (!rec) {
+    rec = await api(`/api/analyses/${id}`);
+    revDetailCache.set(id, rec);
+  }
+  const confusedPairs = rec.result.pairs.filter((p) => p.confused_at_w);
+  const pairTxt = confusedPairs
+    .map((p) => `${esc(rec.snapshot[p.a].name)}↔${esc(rec.snapshot[p.b].name)}（W 位最小距离 ${p.witness.distance_at_w}）`)
+    .join("、");
+  meta.innerHTML = `快照 #${id}（冻结）：W=${rec.w}（${(rec.w * 0.1).toFixed(1)} s），k=${rec.k}，阈值 2k=${rec.result.threshold}；`
+    + `W 位仍混淆灯对 ${confusedPairs.length} 对：${pairTxt}。`;
+  rec.snapshot.forEach((s, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = `${i + 1}. ${s.name}（${s.pattern}，${s.pattern.length} 位）`;
+    lightSel.add(opt);
+  });
+  if (prevLight >= 0 && prevLight < rec.snapshot.length) lightSel.value = String(prevLight);
+}
+
+function revPatternHTML(pattern, flipSet) {
+  return [...pattern].map((c, t) =>
+    `<span class="${c === "1" ? "b1" : "b0"}${flipSet.has(t) ? " flip" : ""}">${c}</span>`).join("");
+}
+
+function revRulerHTML(n, flipSet) {
+  return [...Array(n)].map((_, t) => {
+    const cls = flipSet.has(t) ? "rl flip" : (t % 10 === 0 ? "rl" : "");
+    const txt = flipSet.has(t) ? "^" : (t % 10 === 0 ? String(t + 1).slice(-1) : "");
+    return `<span class="${cls}">${txt}</span>`;
+  }).join("");
+}
+
+function renderRevision(rec) {
+  const box = $("#rev-result");
+  if (!rec.found) {
+    const blockers = rec.unchanged_blocking_pairs.length
+      ? `<div class="rev-blockers"><b>未被修订灯对的固有阻塞：</b>${
+          rec.unchanged_blocking_pairs.map((p) =>
+            `${esc(p.name_a)} ↔ ${esc(p.name_b)}（W 位最小距离 ${p.distance} ≤ 2k=${rec.threshold}）`).join("；")
+        }——只改一盏灯无法消除这些灯对的混淆。</div>` : "";
+    box.innerHTML = `
+      <div class="inv-verdict none">
+        <div class="big">无可行修订 ✗</div>
+        <div class="detail">${esc(rec.reason)}</div>
+      </div>
+      <div class="inv-block">
+        <h3>被修订灯原灯串（未改动工作区）</h3>
+        <div class="rev-pattern">
+          <div class="bit-strip"><span class="lab"></span>${revRulerHTML(rec.pattern_before.length, new Set())}</div>
+          <div class="bit-strip"><span class="lab">${esc(rec.light_name)}</span>${revPatternHTML(rec.pattern_before, new Set())}</div>
+        </div>
+        <div class="funnel-note">已穷举评估 ${rec.candidates_evaluated} 个合法候选（翻转后仍同时含 0、1），
+          可行 ${rec.feasible_count} 个。<b>工作区、历史分析与反演记录均未改动。</b></div>
+        ${blockers}
+      </div>`;
+    return;
+  }
+  const rev = rec.revision;
+  const tp = rev.tightest_pair;
+  const flipSet = new Set(rev.flip_positions);
+  const posTxt = rev.flip_positions_1based.join("、");
+  const win = tp.bits_a.length;
+  const tpRuler = [...Array(win)].map((_, t) =>
+    `<span class="${t % 10 === 0 ? "rl" : ""}">${t % 10 === 0 ? String(t + 1).slice(-1) : ""}</span>`).join("");
+  const marks = [...tp.diff_mark].map((c) =>
+    `<span class="${c === "^" ? "mark" : ""}">${c === "^" ? "^" : "·"}</span>`).join("");
+
+  box.innerHTML = `
+    <div class="inv-verdict unique">
+      <div class="big">找到修订建议 ✓</div>
+      <div class="detail">
+        只翻灯 <b>${esc(rev.light_name)}</b> 的 <b>${rev.nflips}</b> 位
+        （从 1 起位置：<b>${posTxt}</b>，0 基：${rev.flip_positions.join("、")}），
+        修订后全部灯对在 W=${rec.w} 位、穷举全部独立相位后的全局最小汉明距离为
+        <b>${rev.global_min_distance}</b> <b>&gt; 2k=${rec.threshold}</b>。
+      </div>
+    </div>
+    <div class="inv-block">
+      <h3>修改前后灯串（黄底 = 翻转位）</h3>
+      <div class="rev-pattern">
+        <div class="bit-strip"><span class="lab">位置</span>${revRulerHTML(rev.pattern_before.length, flipSet)}</div>
+        <div class="bit-strip"><span class="lab">修改前</span>${revPatternHTML(rev.pattern_before, flipSet)}</div>
+        <div class="bit-strip"><span class="lab">修改后</span>${revPatternHTML(rev.pattern_after, flipSet)}</div>
+      </div>
+      <div class="funnel-note" style="margin-top:4px">
+        翻转位（1 基 / 0.1 s 时刻）：${rev.flip_positions_1based.map((p) => `${p}（${((p - 1) * 0.1).toFixed(1)} s）`).join("、")}。
+      </div>
+    </div>
+    <div class="inv-block">
+      <h3>裁决依据</h3>
+      <div class="funnel-note">${esc(rec.selection_rule)}。</div>
+      <div class="funnel-note">同翻转数共穷举评估 <b>${rec.candidates_evaluated}</b> 个合法候选，
+        其中可行 <b>${rec.feasible_count}</b> 个；未改灯对的判定只计算一次并复用，
+        逐对计算中出现 ≤ 2k 即精确剪枝。每个候选都检验<b>全部灯对</b>，不仅修原混淆灯对。</div>
+    </div>
+    <div class="inv-block">
+      <h3>修订后最紧灯对（W 位全局最小距离的取得者）</h3>
+      <div class="funnel-note" style="margin-bottom:4px">
+        <b>${esc(tp.name_a)}</b> ↔ <b>${esc(tp.name_b)}</b>：
+        穷举全部独立相位后的最小汉明距离 = <b>${tp.distance}</b>
+        （&gt; 2k=${rec.threshold}）；最近相位：${esc(tp.name_a)} 起始相位 <b>${tp.phase_a}</b>，
+        ${esc(tp.name_b)} 起始相位 <b>${tp.phase_b}</b>；
+        差异位（1 基）：${tp.diff_positions.length ? tp.diff_positions.slice(0, 60).map((p) => p + 1).join("、") : "无"}
+        ${tp.diff_positions.length > 60 ? ` …（共 ${tp.diff_positions.length} 处）` : ""}
+      </div>
+      <div class="bit-strip"><span class="lab"></span>${marks}</div>
+      <div class="bit-strip"><span class="lab">${esc(tp.name_a)}</span>${[...tp.bits_a].map((c) => `<span class="${c === "1" ? "b1" : "b0"}">${c}</span>`).join("")}</div>
+      <div class="bit-strip"><span class="lab">${esc(tp.name_b)}</span>${[...tp.bits_b].map((c) => `<span class="${c === "1" ? "b1" : "b0"}">${c}</span>`).join("")}</div>
+      <div class="bit-strip ruler"><span class="lab"></span>${tpRuler}</div>
+    </div>
+    <div class="rev-apply-bar">
+      <button id="btn-apply-rev" class="btn accent" type="button">应用此方案到当前灯串（服务端复核 + 事务核对）</button>
+      <span class="muted">仅替换当前工作区该盏灯的灯串；冻结历史分析与反演记录不变。若当前灯串/参数与快照不一致，服务端拒绝且不写入。</span>
+    </div>`;
+
+  $("#btn-apply-rev").addEventListener("click", async () => {
+    const btn = $("#btn-apply-rev");
+    btn.disabled = true;
+    try {
+      const res = await api(`/api/analyses/${$("#rev-snapshot").value}/revision-apply`, {
+        method: "POST",
+        body: JSON.stringify({
+          light_index: rec.light_index,
+          flip_positions: rev.flip_positions,
+        }),
+      });
+      setMsg($("#rev-msg"),
+        `已应用：${res.light_name} 灯串 ${res.pattern_before} → ${res.pattern_after}（仅替换该盏；历史记录未改动）。左侧灯串已同步刷新，可重新“保存并分析”复验。`,
+        "ok");
+      // 同步左侧当前灯串编辑器
+      lights = res.lights.map((l) => ({ name: l.name, pattern: l.pattern }));
+      renderLightRows();
+    } catch (e) {
+      setMsg($("#rev-msg"), "应用被拒绝：" + e.message, "err");
+      btn.disabled = false;
+    }
+  });
+}
+
+$("#tab-revise").addEventListener("click", async () => {
+  switchTab("revise");
+  await loadRevSnapshots();
+});
+$("#rev-snapshot").addEventListener("change", renderRevSnapshot);
+
+$("#btn-revise").addEventListener("click", async () => {
+  const msg = $("#rev-msg");
+  const id = Number($("#rev-snapshot").value);
+  const lightIndex = Number($("#rev-light").value);
+  const maxFlips = Number($("#rev-maxflips").value);
+  if (!id) { setMsg(msg, "请先选择一条不可辨的冻结分析。", "err"); return; }
+  if (!Number.isInteger(lightIndex) || lightIndex < 0) {
+    setMsg(msg, "请指定要修订的灯。", "err"); return;
+  }
+  const btn = $("#btn-revise");
+  btn.disabled = true;
+  setMsg(msg, "正在穷举全部翻转候选（每候选均穷举全部灯对的全部独立相位）……", "info");
+  try {
+    const res = await api(`/api/analyses/${id}/revision-suggest`, {
+      method: "POST",
+      body: JSON.stringify({ light_index: lightIndex, max_flips: maxFlips }),
+    });
+    revSuggestion = res;
+    if (res.found) {
+      setMsg(msg, `已穷举 ${res.candidates_evaluated} 个候选，按裁决规则给出最优修订。`, "ok");
+    } else {
+      setMsg(msg, "无解：该灯在限定翻转位数内无法使全部灯对可辨；工作区未改动。", "err");
+    }
+    renderRevision(res);
+  } catch (e) {
+    setMsg(msg, e.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---------- 初始化 ----------
 async function init() {
   const state = await api("/api/state");
@@ -683,6 +901,7 @@ async function init() {
   renderLightRows();
   await loadHistory();
   await loadInversions();
+  await loadRevSnapshots();
 }
 
 init().catch((e) => {

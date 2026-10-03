@@ -24,6 +24,7 @@ g 个等价类，每类恰有 L = lcm(La, Lb) 个成员，同类成员的差异�
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Any
 
@@ -389,5 +390,283 @@ def invert(snapshot: list[dict[str, str]], observation: str, e: int, w: int) -> 
         "exhaustive_note": (
             "穷举快照内每盏灯的全部循环相位（合计 sum(串长) 个），"
             "按前缀累计汉明距离 ≤ e 逐步筛除，不抽样、不略过任何相位"
+        ),
+    }
+
+
+# ============================ 灯串修订建议搜索 ============================
+
+def _pair_min_distance_at_w(pa: np.ndarray, pb: np.ndarray, w: int) -> tuple[int, int, int]:
+    """穷举两灯全部独立相位，返回 (W 位最小汉明距离, 最近相位 i, 最近相位 j)。
+
+    与 ``analyze`` 的 gcd 等价类枚举完全等价（无抽样）：相位组合按
+    (i-j) mod g 分 g 类，每类 L=lcm(La,Lb) 个成员，g*L=La*Lb 覆盖全部
+    La*Lb 个独立相位；修订搜索只需要 W 位这一个窗口长度的最小距离。
+    """
+    la, lb = int(pa.size), int(pb.size)
+    g = math.gcd(la, lb)
+    period = la // g * lb
+    qvec = np.arange(g, dtype=np.int64)[:, None]
+    uu = np.arange(period, dtype=np.int64)[None, :]
+    i_idx = uu % la
+    j_idx = (uu - qvec) % lb
+    mm_all = (pa[i_idx] != pb[j_idx]).astype(np.int16)        # (g,L) 一个完整周期
+    s = np.arange(period, dtype=np.int64)
+    t = np.arange(w, dtype=np.int64)
+    # rot_idx 显式列出 t=0..W-1 的全部周期位置（W 大于周期时含整周重复），
+    # 故直接对 W 维求和即为 W 位汉明距离，无需另加整周期项
+    rot_idx = (t[None, :] + s[:, None]) % period              # (L,W)
+    mismatch = mm_all[:, rot_idx]                             # (g,L,W)
+    dist = mismatch.sum(axis=2)                               # (g,L)
+    flat = dist.reshape(g * period)
+    ph = int(flat.argmin())
+    q0, s0 = divmod(ph, period)
+    i0 = int(s0 % la)
+    j0 = int((s0 - q0) % lb)
+    return int(flat[ph]), i0, j0
+
+
+def _pair_witness(pa: np.ndarray, pb: np.ndarray, w: int) -> dict[str, Any]:
+    """W 位下最近相位组合的逐位见证（最紧灯对展示用）。"""
+    la, lb = int(pa.size), int(pb.size)
+    d, i0, j0 = _pair_min_distance_at_w(pa, pb, w)
+    mm = np.array(
+        [pa[(tt + i0) % la] != pb[(tt + j0) % lb] for tt in range(w)],
+        dtype=np.int8,
+    )
+    diff_positions = [int(p) for p in np.nonzero(mm)[0].tolist()]
+    bits_a = "".join(str(int(pa[(tt + i0) % la])) for tt in range(w))
+    bits_b = "".join(str(int(pb[(tt + j0) % lb])) for tt in range(w))
+    mark = "".join("^" if tt in set(diff_positions) else " " for tt in range(w))
+    return {
+        "phase_a": i0,
+        "phase_b": j0,
+        "distance": d,
+        "diff_positions": diff_positions,
+        "diff_count": len(diff_positions),
+        "bits_a": bits_a,
+        "bits_b": bits_b,
+        "diff_mark": mark,
+    }
+
+
+def revise(
+    snapshot: list[dict[str, str]],
+    w: int,
+    k: int,
+    light_index: int,
+    max_flips: int,
+) -> dict[str, Any]:
+    """灯串修订建议搜索。
+
+    在不可辨冻结快照上，只允许翻转指定一盏灯的灯串 1~``max_flips`` 位
+    （翻转 = 0↔1），搜索使全部灯对在 W 位、穷举全部独立相位后的最小
+    汉明距离均严格大于 2k 的修订方案。
+
+    搜索与裁决
+    ----------
+    - 候选按翻转数升序（1 位、再 2 位）穷举；同翻转数内按“翻转位置从 0
+      起的位置序列字典序”升序（2 位即 (p1,p2) 的字典序）。
+    - 裁决键：(翻转数最少, 可行候选 W 位全局最小距离最大, 翻转位置序列
+      字典序最小)。因此**不是**返回首个可行方案，而是穷举完同一翻转数
+      的全部候选后取最优；1 位存在可行解时不再搜索 2 位。
+    - 判定覆盖全部灯对：未改灯对（两盏灯都不是被修订灯）的 W 位最小
+      距离只算一次并复用；被修订灯与其余每盏灯的灯对逐候选重算（被改
+      灯串不同，无法复用），任一灯对距离 ≤ 2k 即对该候选精确剪枝出局。
+    - 翻转后灯串仍须同时含 0、1（与录入约束一致）。
+
+    返回
+    ----
+    见 README「灯串修订建议」。无解时 ``found=False``，不附带方案。
+    """
+    m = len(snapshot)
+    if not (MIN_LIGHTS <= m <= MAX_LIGHTS):
+        raise ValueError("灯的数量必须在 2~20 之间")
+    if not (MIN_W <= w <= MAX_W):
+        raise ValueError("W 必须在 1~400 之间")
+    if not (MIN_K <= k <= MAX_K):
+        raise ValueError("k 必须在 0~3 之间")
+    if not (0 <= light_index < m):
+        raise ValueError("指定的灯序号超出快照范围")
+    if max_flips not in (1, 2):
+        raise ValueError("最多翻转位数只能为 1 或 2")
+
+    patterns = [item["pattern"] for item in snapshot]
+    for idx, p in enumerate(patterns):
+        if not (MIN_PATTERN_LEN <= len(p) <= MAX_PATTERN_LEN) or any(c not in "01" for c in p):
+            raise ValueError(f"灯 {idx + 1} 的灯串非法")
+    arrs = [np.frombuffer(p.encode("ascii"), dtype=np.uint8) - ord("0") for p in patterns]
+
+    threshold = 2 * k
+    target = light_index
+    original = patterns[target]
+    L = len(original)
+
+    # 未改灯对判定（复用）：两盏灯都不是被修订灯的灯对，W 位最小距离
+    # 与候选无关，只穷举一次。原快照不可辨时其中必有 ≤ 2k 者——那种情况
+    # 只改一盏灯无法消除，搜索将必定无解（仍完整走完搜索逻辑以给出统计）。
+    unchanged_floor = np.iinfo(np.int64).max
+    unchanged_pairs: list[dict[str, Any]] = []
+    for a in range(m):
+        if a == target:
+            continue
+        for b in range(a + 1, m):
+            if b == target:
+                continue
+            d, ia, ib = _pair_min_distance_at_w(arrs[a], arrs[b], w)
+            unchanged_floor = min(unchanged_floor, d)
+            unchanged_pairs.append({"a": a, "b": b, "distance": d, "phase_a": ia, "phase_b": ib})
+
+    other_idx = [i for i in range(m) if i != target]
+
+    def evaluate(cand_bits: np.ndarray) -> tuple[bool, int, dict[str, Any] | None]:
+        """评估一个候选灯串：返回 (是否可行, 全局最小距离, 最紧灯对见证)。
+
+        逐对计算被修订灯与其余灯的 W 位最小距离；任一灯对 ≤ 2k 立即判
+        不可行（精确剪枝，不遗漏——距离只取决于该灯对，与其他灯对无关）。
+        """
+        global_min = int(unchanged_floor)
+        if global_min <= threshold:
+            return False, global_min, None
+        tightest: dict[str, Any] | None = None
+        tight_d = global_min
+        # 未改灯对中的最紧者，作为见证初值（取距离恰为全局最小的第一对）
+        for up in unchanged_pairs:
+            if tightest is None or up["distance"] < tightest["distance"]:
+                tightest = {
+                    "a": up["a"], "b": up["b"],
+                    "distance": up["distance"],
+                    "phase_a": up["phase_a"], "phase_b": up["phase_b"],
+                }
+        for j in other_idx:
+            d, pj, pi = _pair_min_distance_at_w(cand_bits, arrs[j], w)
+            # 相位顺序按 (被修订灯相位, 另一灯相位) 归一化记录
+            if target < j:
+                wit = {"a": target, "b": j, "distance": d, "phase_a": pj, "phase_b": pi}
+            else:
+                wit = {"a": j, "b": target, "distance": d, "phase_a": pi, "phase_b": pj}
+            if d < tight_d:
+                tight_d = d
+                tightest = wit
+            if d <= threshold:
+                return False, min(global_min, d), None
+            global_min = min(global_min, d)
+        return True, global_min, tightest
+
+    def full_witness(tight: dict[str, Any]) -> dict[str, Any]:
+        a, b = tight["a"], tight["b"]
+        pa = cand_cache[a]
+        pb = cand_cache[b]
+        wn = _pair_witness(pa, pb, w)
+        return {
+            "a": a,
+            "b": b,
+            "name_a": snapshot[a]["name"],
+            "name_b": snapshot[b]["name"],
+            **wn,
+        }
+
+    # 候选灯串缓存（供最紧灯对见证重放）：评估时被修订灯用候选，其余用快照
+    cand_cache: dict[int, np.ndarray] = {i: arrs[i] for i in range(m)}
+
+    best: dict[str, Any] | None = None
+    best_key: tuple[int, int, tuple[int, ...]] | None = None
+    evaluated = 0
+    feasible_count = 0
+
+    # 翻转集合按翻转数、位置序列字典序生成（itertools.combinations 天然
+    # 按位置升序元组的字典序产出）。
+    for nflips in range(1, max_flips + 1):
+        if best is not None:
+            break  # 更少翻转数已有可行解，不再搜索更多翻转
+        for positions in itertools.combinations(range(L), nflips):
+            cand = arrs[target].copy()
+            for p in positions:
+                cand[p] ^= 1
+            # 修订后灯串仍须同时含 0、1
+            if not (cand.any() and (~cand.astype(bool)).any()):
+                continue
+            evaluated += 1
+            cand_cache[target] = cand
+            feasible, gmin, tight = evaluate(cand)
+            if not feasible:
+                continue
+            feasible_count += 1
+            key = (nflips, -gmin, positions)
+            # 裁决：翻转数最少（外层已保证）→ 全局最小距离最大 →
+            # 翻转位置序列字典序最小
+            if best_key is None or key < best_key:
+                best_key = key
+                witness = full_witness(tight)
+                new_pattern = "".join("01"[int(x)] for x in cand.tolist())
+                best = {
+                    "light_index": target,
+                    "light_name": snapshot[target]["name"],
+                    "nflips": nflips,
+                    "flip_positions": list(positions),          # 0 基
+                    "flip_positions_1based": [p + 1 for p in positions],
+                    "pattern_before": original,
+                    "pattern_after": new_pattern,
+                    "global_min_distance": gmin,
+                    "tightest_pair": witness,
+                }
+
+    unchanged_bad = [
+        {"a": up["a"], "b": up["b"], "name_a": snapshot[up["a"]]["name"],
+         "name_b": snapshot[up["b"]]["name"], "distance": up["distance"]}
+        for up in unchanged_pairs if up["distance"] <= threshold
+    ]
+
+    if best is None:
+        reason = (
+            f"在快照 W={w}、k={k}（阈值 2k={threshold}）下，只翻转灯"
+            f"「{snapshot[target]['name']}」至多 {max_flips} 位"
+            "（穷举全部 1" + ("、2" if max_flips == 2 else "") +
+            " 位翻转组合，且修订后灯串仍同时含 0、1）后，"
+            "不存在使全部灯对 W 位最小汉明距离均 > 2k 的方案。"
+        )
+        if unchanged_bad:
+            names = "、".join(
+                f"{x['name_a']}↔{x['name_b']}（{x['distance']}）" for x in unchanged_bad
+            )
+            reason += f" 其中未被修订的灯对 {names} 的 W 位最小距离本就 ≤ 2k，只改一盏灯无法消除。"
+        return {
+            "found": False,
+            "w": w,
+            "k": k,
+            "threshold": threshold,
+            "light_index": target,
+            "light_name": snapshot[target]["name"],
+            "max_flips": max_flips,
+            "pattern_before": original,
+            "candidates_evaluated": evaluated,
+            "feasible_count": 0,
+            "unchanged_blocking_pairs": unchanged_bad,
+            "reason": reason,
+            "exhaustive": True,
+        }
+
+    return {
+        "found": True,
+        "w": w,
+        "k": k,
+        "threshold": threshold,
+        "light_index": target,
+        "light_name": snapshot[target]["name"],
+        "max_flips": max_flips,
+        "candidates_evaluated": evaluated,
+        "feasible_count": feasible_count,
+        "unchanged_blocking_pairs": unchanged_bad,
+        "revision": best,
+        "selection_rule": (
+            "翻转数最少 → 可行方案 W 位全局最小汉明距离最大 → "
+            "翻转位置序列（从 0 起）字典序最小；穷举同翻转数全部候选后裁决，"
+            "非首个可行方案"
+        ),
+        "exhaustive": True,
+        "exhaustive_note": (
+            "每个候选均穷举全部灯对的全部独立起始相位（La*Lb 个）求 W 位"
+            "最小汉明距离；未改灯对判定只计算一次并复用，逐对计算中一旦"
+            "出现 ≤ 2k 立即精确剪枝"
         ),
     }

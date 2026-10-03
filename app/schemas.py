@@ -71,3 +71,28 @@ class InversionCreate(BaseModel):
         if any(c not in "01" for c in v):
             raise ValueError("观测串只能由字符 0、1 组成")
         return v
+
+
+class RevisionCreate(BaseModel):
+    """灯串修订建议请求：在指定不可辨冻结快照上，只翻指定一盏灯。"""
+
+    light_index: int = Field(..., ge=0, description="快照内被修订灯的序号（0 基）")
+    max_flips: int = Field(..., ge=1, le=2, description="最多翻转位数，只允许 1 或 2")
+
+
+class RevisionApply(BaseModel):
+    """应用修订建议：服务端按下列字段独立复核后再落库。"""
+
+    light_index: int = Field(..., ge=0, description="快照内被修订灯的序号（0 基）")
+    flip_positions: list[int] = Field(
+        ..., min_length=1, max_length=2, description="翻转位置（0 基），1 或 2 个且互不相同"
+    )
+
+    @field_validator("flip_positions")
+    @classmethod
+    def _flip_positions(cls, v: list[int]) -> list[int]:
+        if any(not isinstance(x, int) or x < 0 or x > 79 for x in v):
+            raise ValueError("翻转位置须为 0~79 的整数")
+        if len(set(v)) != len(v):
+            raise ValueError("翻转位置不能重复")
+        return v
