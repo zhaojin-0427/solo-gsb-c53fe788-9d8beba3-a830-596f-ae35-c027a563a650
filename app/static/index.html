@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>航标灯质可辨性预检台</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>航标灯质可辨性预检台</h1>
+    <div class="subtitle">本地运行 · 穷举全部独立起始相位 · 每位 0.1 秒 · 可辨条件：最小汉明距离 &gt; 2k · 观测反演：汉明距离 ≤ e 按前缀筛候选</div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：当前设计 -->
+    <section class="panel panel-left">
+      <div class="panel-head">
+        <h2>当前灯串与参数</h2>
+        <button id="btn-save-lights" class="btn primary">保存灯串/参数</button>
+      </div>
+
+      <div class="params">
+        <label>观测窗口上限 W（1～400，位）
+          <input id="inp-w" type="number" min="1" max="400" step="1" />
+        </label>
+        <label>每段最多误判 k（0～3，位）
+          <input id="inp-k" type="number" min="0" max="3" step="1" />
+        </label>
+        <div class="params-meta">每位 = 0.1 s；可辨阈值 = 2k（k 判 0、k 判 1 各最多 k 位）</div>
+      </div>
+
+      <div class="lights-head">
+        <span>灯串（2～20 盏，长度 2～80，须同时含 0、1）</span>
+        <div>
+          <button id="btn-add" class="btn small" type="button">＋ 添加</button>
+        </div>
+      </div>
+      <div id="light-rows" class="light-rows"></div>
+      <div id="edit-msg" class="msg" role="status"></div>
+
+      <div class="analyze-bar">
+        <input id="inp-note" type="text" maxlength="200" placeholder="分析备注（可选，最多 200 字）" />
+        <button id="btn-analyze" class="btn accent" type="button">保存并分析（穷举全部相位）</button>
+      </div>
+      <div id="analyze-msg" class="msg" role="status"></div>
+    </section>
+
+    <!-- 中：结果（预检 / 观测反演 两个标签页） -->
+    <section class="panel panel-main">
+      <div class="tabs" role="tablist">
+        <button id="tab-precheck" class="tab active" type="button" role="tab">可辨性预检</button>
+        <button id="tab-invert" class="tab" type="button" role="tab">观测反演</button>
+      </div>
+
+      <div id="pane-precheck">
+        <div id="result-empty" class="empty-hint">
+          点击「保存并分析」生成预检结果。结果将冻结保存时的灯串与参数，之后编辑灯串不会改变既有结果。
+        </div>
+        <div id="result" class="result" hidden></div>
+      </div>
+
+      <div id="pane-invert" hidden>
+        <div class="invert-form">
+          <label class="inv-field">① 选择已保存分析的冻结快照
+            <select id="inv-snapshot"></select>
+          </label>
+          <div id="inv-snap-meta" class="inv-snap-meta muted"></div>
+          <label class="inv-field">② 实际观测 0/1 串（1～W 位，每位 0.1 s）
+            <input id="inv-obs" type="text" inputmode="binary" spellcheck="false"
+                   maxlength="400" placeholder="例如 1110000011" autocomplete="off" />
+          </label>
+          <div class="inv-row">
+            <label class="inv-e">误判上限 e（0～3，位）
+              <input id="inv-e" type="number" min="0" max="3" step="1" value="0" />
+            </label>
+            <input id="inv-note" type="text" maxlength="200" placeholder="反演备注（可选）" />
+            <button id="btn-invert" class="btn accent" type="button">反演（穷举快照全部相位）</button>
+          </div>
+          <div id="inv-msg" class="msg" role="status"></div>
+        </div>
+        <div id="inv-result" class="inv-result"></div>
+      </div>
+    </section>
+
+    <!-- 右：历史（分析快照 + 反演记录） -->
+    <aside class="panel panel-right">
+      <div class="panel-head"><h2>历史分析（已冻结）</h2></div>
+      <div id="history-list" class="history-list"></div>
+      <div class="panel-head" style="margin-top:16px"><h2>反演记录（已冻结）</h2></div>
+      <div id="inversion-list" class="history-list"></div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+services:
+  beacon-precheck:
+    build: .
+    image: beacon-precheck:latest
+    container_name: beacon-precheck
+    ports:
+      - "8000:8000"
+    volumes:
+      - beacon-data:/srv/data
+    restart: unless-stopped
+
+volumes:
+  beacon-data:
